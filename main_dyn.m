@@ -25,8 +25,8 @@ close all; clear all; warning off
 
 %  ........................................................
 % Choose a model with m_flag:   1 <== Lorenz 63
-%				2 <== Lorenz 96
-%				3 <== Lorenz 05 (model III)
+%				                2 <== Lorenz 96
+%				                3 <== Lorenz 05 (model III)
 m_flag = 3;
 %
 %  ........................................................
@@ -69,15 +69,15 @@ h_flag    = 0;  % Set to 0 for H(x) = x
 % --- Observation parameters ---
 sig_y = 0.1;  % observation error standard deviation
 tau   = 1;    % model time steps between observation times
-obf   = 2;    % observation spatial frequency: spacing between variables
+obf   = 4;    % observation spatial frequency: spacing between variables
 obb   = 0;    % observation buffer: number of variables to skip when generating obs
               % - setting a non-zero obb will create a data void in the domain
 
 % --- EnKF parameters ---
-roi_kf   = 0.001; % EnKF localization radius of influence
+roi_kf   = 0.005; % EnKF localization radius of influence
 gamma    = 0.7;   % RTPS/RTPP parameter (options 2 or 3)
 inf_flag = 2;     % 0 ==> no inflation
-		  % 1 ==> State-space adaptive inflation (Anderson)
+		          % 1 ==> State-space adaptive inflation (Anderson)
                   % 2 ==> Relaxation to prior spread (RTPS)
     	          % 3 ==> Relaxation to prior perturbations (RTPP)
 
@@ -143,7 +143,7 @@ switch m_flag
   % Two-scale Lorenz 05 model parameters
   case 3, 
 
-    Nx = 480;   % model variables
+    Nx = 960;   % model variables
     dt = 0.05;  % time step
     F  = 15;    % forcing term (truth)
     Fe = 15;    % forcing term (model)
@@ -154,9 +154,13 @@ switch m_flag
 
 end
 
+% Set ob and model bias
+obbias = 0
+modbias = 0.5
+
 % Start parallel run
 delete(gcp('nocreate'))
-poolobj = parpool(10);
+poolobj = parpool(8);
 
 % Use same random numbers each experiment
 rng(1); 
@@ -224,10 +228,6 @@ switch m_flag
     xt = M_nl_l05III(xt,dt,1000*0.05/dt,K,Im,b,c,F);
 end
 
-% Start parallel run
-delete(gcp('nocreate'))
-poolobj = parpool(20);
-
 % Run initial ensemble forecast
 parfor n = 1:Ne
 %for n = 1:Ne
@@ -280,7 +280,6 @@ switch h_flag
 end
 
 % Include obs bias
-obbias = 0;
 Y = Y + obbias;
 
 % Initialize prior ensemble and deterministic state for all experiments
@@ -292,11 +291,19 @@ for f = 1:Nf
 end
 clear xi
 
-% Initialize inflation values for adaptive inflation
 for f = 1:Nf
+  % Initialize inflation values for adaptive inflation
   prior_inf{f} = ones(Nx,1);
   prior_inf_y{f} = ones(Ny,1);
   var_inf = 0.8;
+
+  % Preallocate arrays for output statistics % Knisely
+  prior_mean{f} = zeros(Nx,T);
+  post_mean{f} = zeros(Nx,T);
+  prior_spread{f} = zeros(Nx,T);
+  post_spread{f} = zeros(Nx,T);
+  innov_mean{f} = zeros(Ny,T);
+  anal_incr{f} = zeros(Nx,T);
 end
 
 %  --------------------------------------------------------
@@ -308,9 +315,9 @@ end
 e_flag = 0;
 for t = 1:T % Time loop
 
-  % Include model bias in x
+  % Add model bias to prior
   for f = 1:Nf
-    x{f} = x{f} + 0.5;
+    x{f} = x{f} + modbias;
   end
 
   % Plot prior information for each filter time
@@ -357,7 +364,7 @@ for t = 1:T % Time loop
 
       % 4DVar with tangent linear and adjoint
       case 1
-p
+
         % Perform update for all obs over window 
         if i_obs == 1
 
@@ -597,6 +604,17 @@ p
 
     % TEMP: turn off
     qcpass = zeros(1,Ny);
+    
+    % Save prior ens mean, ens spread, and innovation % Knisely 
+    x_prior_mean = mean(x{f}, 2);
+    prior_mean{f}(:,t) = x_prior_mean;
+
+    for i = 1:Nx
+      prior_spread{f}(i,t) = std(x{f}(i,:));
+    end
+
+    hx_mean = mean(hx, 2);
+    innov_mean{f}(:,t) = Y(:,t) - hx_mean;
 
     % Call filter 
     switch f_flag{f}
@@ -634,6 +652,15 @@ p
       end
     end
 
+    % Save post ens mean, ens spread, and analysis increment % Knisely 
+    post_mean{f}(:,t) = xm{f};
+    
+    for i = 1:Nx
+      post_spread{f}(i,t) = std(x{f}(i,:));
+    end
+    
+    anal_incr{f}(:,t) = xm{f} - x_prior_mean;
+    
     % Save solution for verification
     if (s_flag{f} > 0) && (mod(t,I) == 0)
       xm{f} = xdet{f};
@@ -778,12 +805,10 @@ disp(' ')
 %return
 
 % Save data
-data.err = err;
-data.sig = sig;
-ofile = ['DATA/pf_rmse_sprd_sig_y_',num2str(sig_y),'.mat'];
+ofile = ['DATA/err_stats_obbias_',num2str(obbias),'_modbias_',num2str(modbias),'.mat'];
 fid = fopen(ofile,'w');
 disp(['Saving data to ',ofile])
-save(ofile,'data');
+save(ofile,'prior_mean','post_mean','prior_spread','post_spread','innov_mean','anal_incr');
 fclose(fid);
 
 % Save plot
@@ -791,6 +816,8 @@ set(gca,'ylim',[0,5])
 set(fig,'PaperSize',[12,5])
 set(fig,'PaperPositionMode','manual'); 
 set(fig,'PaperPosition',[0,0.1,12,5]);
-ofile = ['FIGS/pf_rmse_sprd_',num2str(sig_y),'.pdf'];
+ofile = ['FIGS/rmse_sprd_',num2str(sig_y),'_modbias_',num2str(modbias),'.pdf'];
 disp(['Saving figure to ',ofile])
 saveas(fig, ofile,'pdf')
+
+delete(gcp('nocreate'))
